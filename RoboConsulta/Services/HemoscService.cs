@@ -1,65 +1,115 @@
-using System.Net.Http;
 using HtmlAgilityPack;
-using OpenQA.Selenium;
-using RoboConsulta.Page;
-using RoboConsulta.Data;
+using RoboConsulta.Models;
 
-namespace RoboConsulta.Services
+namespace RoboConsulta.Services;
+
+public class HemoscService
 {
-    public record MissingBloodModel(string Tipo, string Status);
+    private const string HemoscUrl = "https://www.hemosc.org.br/";
+    private readonly HttpClient _httpClient;
+    private const int MaxRetries = 3;
+    private const int InitialDelayMs = 1000;
 
-    public class HemoscService
+    public HemoscService(HttpClient? httpClient = null)
     {
-        private readonly HemoscPage? _page;
+        _httpClient = httpClient ?? new HttpClient();
+        ConfigureHttpClient();
+    }
 
-        public HemoscService(HemoscPage? page = null)
+    private void ConfigureHttpClient()
+    {
+        _httpClient.DefaultRequestHeaders.Clear();
+        _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        _httpClient.DefaultRequestHeaders.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8");
+        _httpClient.DefaultRequestHeaders.Add("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7");
+        _httpClient.DefaultRequestHeaders.Add("Accept-Encoding", "gzip, deflate, br");
+        _httpClient.DefaultRequestHeaders.Add("Referer", "https://www.google.com/");
+        _httpClient.DefaultRequestHeaders.Add("DNT", "1");
+        _httpClient.Timeout = TimeSpan.FromSeconds(30);
+    }
+
+    public async Task<List<MissingBlood>> GetMissingBloodsAsync()
+    {
+        for (int attempt = 1; attempt <= MaxRetries; attempt++)
         {
-            _page = page;
+            try
+            {
+                var html = await FetchWithTimeoutAsync();
+                return ParseMissingBloods(html);
+            }
+            catch (HttpRequestException) when (attempt < MaxRetries)
+            {
+                int delayMs = InitialDelayMs * (int)Math.Pow(2, attempt - 1);
+                await Task.Delay(delayMs);
+                continue;
+            }
+            catch (HttpRequestException ex)
+            {
+                throw new InvalidOperationException($"Failed to fetch Hemosc website: {HemoscUrl} after {MaxRetries} attempts", ex);
+            }
         }
 
-        public List<MissingBloodModel> GetMissingBloodsWithSelenium()
+        throw new InvalidOperationException($"Failed to fetch Hemosc website: {HemoscUrl}");
+    }
+
+    private async Task<string> FetchWithTimeoutAsync()
+    {
+        using (var request = new HttpRequestMessage(HttpMethod.Get, HemoscUrl))
         {
-            if (_page == null) throw new InvalidOperationException("HemoscPage is not available. Construct HemoscService with a HemoscPage to use Selenium.");
+            request.Headers.Add("Connection", "keep-alive");
+            request.Headers.Add("Upgrade-Insecure-Requests", "1");
 
-            _page.Navegar();
-            var list = new List<MissingBloodModel>();
-
-            var nodes = _page.driver.FindElements(By.CssSelector("p.text_verm.font_dinn_medi2"));
-            foreach (var node in nodes)
+            using (var response = await _httpClient.SendAsync(request))
             {
-                var fullText = node.Text;
-                var lines = fullText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                var tipo = lines.Length > 0 ? lines[0].Trim(' ', '"') : string.Empty;
-                var status = "";
-                try
+                if (!response.IsSuccessStatusCode)
                 {
-                    status = node.FindElement(By.TagName("span")).Text.Trim();
+                    throw new HttpRequestException($"Response status code does not indicate success: {(int)response.StatusCode} ({response.StatusCode}).");
                 }
-                catch { }
-                list.Add(new MissingBloodModel(tipo, status));
+                return await response.Content.ReadAsStringAsync();
             }
-
-            return list;
         }
+    }
 
-        public List<MissingBloodModel> GetMissingBloodsWithHtmlAgility(string html)
+    public List<MissingBlood> ParseMissingBloods(string html)
+    {
+        var doc = new HtmlDocument();
+        doc.LoadHtml(html);
+
+        var list = new List<MissingBlood>();
+        var nodes = doc.DocumentNode.SelectNodes("//p[contains(@class,'text_verm') and contains(@class,'font_dinn_medi2')]");
+
+        if (nodes == null) return list;
+
+        foreach (var node in nodes)
         {
-            var doc = new HtmlDocument();
-            doc.LoadHtml(html);
+            var bloodType = ExtractBloodType(node);
+            var status = ExtractStatus(node);
 
-            var list = new List<MissingBloodModel>();
-            var nodes = doc.DocumentNode.SelectNodes("//p[contains(@class,'text_verm') and contains(@class,'font_dinn_medi2')]");
-            if (nodes == null) return list;
-
-            foreach (var node in nodes)
+            if (!string.IsNullOrWhiteSpace(bloodType) && !string.IsNullOrWhiteSpace(status))
             {
-                var tipo = node.ChildNodes.FirstOrDefault(n => n.NodeType == HtmlNodeType.Text)?.InnerText.Trim(' ', '"') ?? string.Empty;
-                var span = node.SelectSingleNode(".//span");
-                var status = span?.InnerText.Trim() ?? string.Empty;
-                list.Add(new MissingBloodModel(tipo, status));
+                list.Add(new MissingBlood(bloodType, status));
             }
-
-            return list;
         }
+
+        return list;
+    }
+
+    private static string ExtractBloodType(HtmlNode node)
+    {
+        var textNode = node.ChildNodes
+            .FirstOrDefault(n => n.NodeType == HtmlNodeType.Text);
+
+        if (textNode != null)
+        {
+            return textNode.InnerText.Trim(' ', '"', '\r', '\n', '\t');
+        }
+
+        return string.Empty;
+    }
+
+    private static string ExtractStatus(HtmlNode node)
+    {
+        var span = node.SelectSingleNode(".//span");
+        return span?.InnerText.Trim() ?? string.Empty;
     }
 }

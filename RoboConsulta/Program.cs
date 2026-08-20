@@ -1,43 +1,45 @@
-using System;
-using System.IO;
-using System.Net.Http;
-using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Serilog;
+using RoboConsulta.Data;
 using RoboConsulta.Services;
+using RoboConsulta.Workers;
 
-// Simple runner that fetches the Hemosc page, parses the missing bloods and writes to a text file.
-// Run with `dotnet run` or start the project in the debugger.
+var mode = args.FirstOrDefault()?.ToLower() ?? "worker";
 
-var url = "https://www.hemosc.org.br/";
-var outputFile = Path.Combine(Directory.GetCurrentDirectory(), "hemosc_bloods.txt");
-
-try
-{
-    using var http = new HttpClient();
-    Console.WriteLine($"Fetching {url} ...");
-    var html = await http.GetStringAsync(url);
-
-    var service = new HemoscService();
-    var items = service.GetMissingBloodsWithHtmlAgility(html);
-
-    if (items.Count == 0)
+var host = Host.CreateDefaultBuilder(args)
+    .ConfigureServices(services =>
     {
-        Console.WriteLine("No items found.");
-        File.AppendAllText(outputFile, $"{DateTime.Now:o} - No items found{Environment.NewLine}");
-    }
-    else
-    {
-        Console.WriteLine($"Found {items.Count} items. Writing to {outputFile}");
-        foreach (var it in items)
+        var connectionString = "Data Source=blood_search.db";
+
+        services.AddSingleton<DatabaseContext>(new DatabaseContext(connectionString));
+        services.AddHttpClient<HemoscService>();
+        services.AddScoped<CronRunner>();
+
+        if (mode == "worker" || mode == "daemon")
         {
-            var line = $"{DateTime.Now:o} | {it.Tipo} | {it.Status}{Environment.NewLine}";
-            File.AppendAllText(outputFile, line);
+            services.AddHostedService<BloodSearchWorker>();
         }
-    }
+    })
+    .UseSerilog((context, loggerConfig) =>
+    {
+        loggerConfig
+            .MinimumLevel.Information()
+            .WriteTo.Console(outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss}] [{Level}] {Message:lj}{NewLine}{Exception}")
+            .WriteTo.File(
+                path: "logs/blood-search-.txt",
+                rollingInterval: RollingInterval.Day,
+                outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss}] [{Level}] {Message:lj}{NewLine}{Exception}",
+                retainedFileCountLimit: 7);
+    })
+    .Build();
 
-    Console.WriteLine("Done.");
-}
-catch (Exception ex)
+if (mode == "cron")
 {
-    Console.Error.WriteLine("Error while fetching/parsing: " + ex.Message);
-    File.AppendAllText(outputFile, $"{DateTime.Now:o} - Error: {ex.Message}{Environment.NewLine}");
+    var cronRunner = host.Services.GetRequiredService<CronRunner>();
+    await cronRunner.ExecuteAsync();
+}
+else
+{
+    await host.RunAsync();
 }
