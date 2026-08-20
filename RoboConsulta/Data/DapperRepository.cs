@@ -18,6 +18,18 @@ namespace RoboConsulta.Data
             return new SqlConnection(_connectionString);
         }
 
+        public Task<IEnumerable<T>> GetAllAsync()
+        {
+            // TODO: Implement using Dapper
+            throw new NotImplementedException();
+        }
+
+        public Task<T?> GetByIdAsync(int id)
+        {
+            // TODO: Implement using Dapper
+            throw new NotImplementedException();
+        }
+
         public Task<int> InsertAsync(T entity)
         {
             // TODO: Implement using Dapper
